@@ -241,12 +241,7 @@ static bool receive_new_data(const unsigned char* data, int size, void* cookie) 
 
 static void* unzip_new_data(void* cookie) {
     NewThreadInfo* nti = (NewThreadInfo*) cookie;
-    if (strncmp(".xz", nti->entry->fileName + (nti->entry->fileNameLen - 3), 3) == 0) {
-        mzProcessZipEntryContentsXZ(nti->za, nti->entry, receive_new_data, nti);
-    } else {
-        mzProcessZipEntryContents(nti->za, nti->entry, receive_new_data, nti);
-    }
-
+    mzProcessZipEntryContents(nti->za, nti->entry, receive_new_data, nti);
     return NULL;
 }
 
