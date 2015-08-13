@@ -33,12 +33,6 @@ typedef struct {
     unsigned char* data;
 } GRSurface;
 
-typedef struct {
-    GRSurface* texture;
-    int cwidth;
-    int cheight;
-} GRFont;
-
 typedef GRSurface* gr_surface;
 
 int gr_init(void);
@@ -53,15 +47,12 @@ void gr_fb_blank(bool blank);
 void gr_clear();  // clear entire surface to current color
 void gr_color(unsigned char r, unsigned char g, unsigned char b, unsigned char a);
 void gr_fill(int x1, int y1, int x2, int y2);
-void gr_set_font(const char* name);
 void gr_text(int x, int y, const char *s, int bold);
 void gr_texticon(int x, int y, gr_surface icon);
 int gr_measure(const char *s);
 void gr_font_size(int *x, int *y);
 
 void gr_blit(gr_surface source, int sx, int sy, int w, int h, int dx, int dy);
-void gr_blend(gr_surface source, int sx, int sy, int w, int h, int dx, int dy);
-
 unsigned int gr_get_width(gr_surface surface);
 unsigned int gr_get_height(gr_surface surface);
 
@@ -75,7 +66,6 @@ typedef int (*ev_set_key_callback)(int code, int value, void *data);
 int ev_init(ev_callback input_cb, void *data);
 void ev_exit(void);
 int ev_add_fd(int fd, ev_callback cb, void *data);
-int ev_del_fd(int fd);
 int ev_sync_key_state(ev_set_key_callback set_key_cb, void *data);
 
 /* timeout has the same semantics as for poll
@@ -126,10 +116,6 @@ int res_create_localized_alpha_surface(const char* name, const char* locale,
 // Free a surface allocated by any of the res_create_*_surface()
 // functions.
 void res_free_surface(gr_surface surface);
-void gr_text_blend(int x,int y, GRFont* pfont);
-
-void set_rainbow_mode(int enabled);
-void move_rainbow(int x);
 
 #ifdef __cplusplus
 }

@@ -33,7 +33,6 @@
 #include <sys/xattr.h>
 #include <linux/xattr.h>
 #include <inttypes.h>
-#include <blkid/blkid.h>
 
 #include "bootloader.h"
 #include "applypatch/applypatch.h"
@@ -48,11 +47,6 @@
 #include "updater.h"
 #include "install.h"
 #include "tune2fs.h"
-
-#include <dirent.h>
-
-static char bakfiles[PATH_MAX][512];
-static int totalbaks = 0;
 
 #ifdef USE_EXT4
 #include "make_ext4fs.h"
@@ -171,16 +165,6 @@ Value* MountFn(const char* name, State* state, int argc, Expr* argv[]) {
         }
         result = mount_point;
     } else {
-        char *detected_fs_type = blkid_get_tag_value(NULL, "TYPE", location);
-        if (detected_fs_type) {
-            uiPrintf(state, "detected filesystem %s for %s\n",
-                    detected_fs_type, location);
-            fs_type = detected_fs_type;
-        } else {
-            uiPrintf(state, "could not detect filesystem for %s, assuming %s\n",
-                    location, fs_type);
-        }
-
         if (mount(location, mount_point, fs_type,
                   MS_NOATIME | MS_NODEV | MS_NODIRATIME,
                   has_mount_options ? mount_options : "") < 0) {
@@ -286,7 +270,7 @@ static int exec_cmd(const char* path, char* const argv[]) {
 //    fs_type="f2fs"   partition_type="EMMC"    location=device    fs_size=<bytes> mount_point=<location>
 //    if fs_size == 0, then make fs uses the entire partition.
 //    if fs_size > 0, that is the size to use
-//    if fs_size < 0, then reserve that many bytes at the end of the partition
+//    if fs_size < 0, then reserve that many bytes at the end of the partition (not for "f2fs")
 Value* FormatFn(const char* name, State* state, int argc, Expr* argv[]) {
     char* result = NULL;
     if (argc != 5) {
@@ -360,18 +344,13 @@ Value* FormatFn(const char* name, State* state, int argc, Expr* argv[]) {
         result = location;
     } else if (strcmp(fs_type, "f2fs") == 0) {
         char *num_sectors;
-        char bytes_reserved[10] = {0};
         if (asprintf(&num_sectors, "%lld", atoll(fs_size) / 512) <= 0) {
             printf("format_volume: failed to create %s command for %s\n", fs_type, location);
             result = strdup("");
             goto done;
         }
-        if (atoll(num_sectors) <=0) {
-            snprintf(bytes_reserved, sizeof(bytes_reserved), "%lld", -atoll(fs_size));
-        }
         const char *f2fs_path = "/sbin/mkfs.f2fs";
-        const char* const f2fs_argv[] = {"mkfs.f2fs", "-t", "-d1", "-r", bytes_reserved,
-                location, NULL};
+        const char* const f2fs_argv[] = {"mkfs.f2fs", "-t", "-d1", location, num_sectors, NULL};
         int status = exec_cmd(f2fs_path, (char* const*)f2fs_argv);
         free(num_sectors);
         if (status != 0) {
@@ -436,7 +415,6 @@ done:
 Value* DeleteFn(const char* name, State* state, int argc, Expr* argv[]) {
     char** paths = malloc(argc * sizeof(char*));
     int i;
-
     for (i = 0; i < argc; ++i) {
         paths[i] = Evaluate(state, argv[i]);
         if (paths[i] == NULL) {
@@ -1188,20 +1166,6 @@ Value* ApplyPatchFn(const char* name, State* state, int argc, Expr* argv[]) {
         return NULL;
     }
 
-    int i;
-    /* Skip files listed in the backup table */
-    for (i=0; i<totalbaks; i++) {
-        if (!strncmp(source_filename, bakfiles[i],PATH_MAX)) {
-            fprintf(((UpdaterInfo*)(state->cookie))->cmd_pipe,
-                "ui_print Skipping update of modified file %s\n", source_filename);
-            /* the command pipe tokenizes on \n, so issue an empty ui_print
-               to do the real line break */
-            fprintf(((UpdaterInfo*)(state->cookie))->cmd_pipe,
-                "ui_print\n");
-            return StringValue(strdup("t"));
-        }
-    }
-
     char* endptr;
     size_t target_size = strtol(target_size_str, &endptr, 10);
     if (target_size == 0 && endptr == target_size_str) {
@@ -1217,6 +1181,7 @@ Value* ApplyPatchFn(const char* name, State* state, int argc, Expr* argv[]) {
     int patchcount = (argc-4) / 2;
     Value** patches = ReadValueVarArgs(state, argc-4, argv+4);
 
+    int i;
     for (i = 0; i < patchcount; ++i) {
         if (patches[i*2]->type != VAL_STRING) {
             ErrorAbort(state, "%s(): sha-1 #%d is not string", name, i);
@@ -1269,30 +1234,12 @@ Value* ApplyPatchCheckFn(const char* name, State* state,
         return NULL;
     }
 
-    int i=0;
-    /* Skip files listed in the backup table */
-    for (i=0; i<totalbaks; i++) {
-        if (!strncmp(filename, bakfiles[i],PATH_MAX)) {
-            /*fprintf(((UpdaterInfo*)(state->cookie))->cmd_pipe,
-                "ui_print Skipping update of modified file %s\n", filename);*/
-            return StringValue(strdup("t"));
-        }
-    }
-
     int patchcount = argc-1;
     char** sha1s = ReadVarArgs(state, argc-1, argv+1);
 
     int result = applypatch_check(filename, patchcount, sha1s);
 
-    if (result == -ENOENT && totalbaks) {
-        /* File is gone, and we're dealing with a system containing
-           modified files supported by the CM backup tool. Push it
-           to the "skippable" list so we don't try to apply it when
-           the time comes, and return OK to any enclosing asserts */
-        sprintf (bakfiles[totalbaks++], "%s", filename);
-        result = 0;
-    }
-
+    int i;
     for (i = 0; i < patchcount; ++i) {
         free(sha1s[i]);
     }
@@ -1331,62 +1278,6 @@ Value* WipeCacheFn(const char* name, State* state, int argc, Expr* argv[]) {
     }
     fprintf(((UpdaterInfo*)(state->cookie))->cmd_pipe, "wipe_cache\n");
     return StringValue(strdup("t"));
-}
-
-static int collect_backup_data(char *bakpath, char *bakroot) {
-    DIR *d;
-
-    d = opendir(bakpath);
-    if (!d) {
-        /* No backups, go away */
-        return 0;
-    }
-    while (1) {
-        struct dirent *entry;
-        const char *d_name;
-        entry = readdir(d);
-        if (!entry) {
-            break;
-        }
-        d_name = entry->d_name;
-        if (entry->d_type & DT_DIR) {
-            if (strcmp (d_name, "..") != 0 &&
-                    strcmp (d_name, ".") != 0) {
-                int path_length;
-                char path[PATH_MAX];
-
-                path_length = snprintf (path, PATH_MAX,
-                        "%s/%s", bakpath, d_name);
-                //printf ("%s\n", path);
-                if (path_length >= PATH_MAX) {
-                    return 1;
-                }
-                collect_backup_data(path, bakroot);
-            }
-        } else {
-            char *fspath = strdup(bakpath);
-            sprintf (bakfiles[totalbaks++], "%s/%s", bakpath+strlen(bakroot), d_name);
-        }
-
-    }
-    closedir(d);
-
-    return 0;
-}
-
-Value* CollectBackupDataFn(const char* name, State* state, int argc, Expr* argv[]) {
-    if (argc < 1) {
-        return ErrorAbort(state, "%s(): expected at least 1 arg, got %d",
-                          name, argc);
-    }
-
-    char* bakpath;
-    if (ReadArgs(state, argv, 1, &bakpath) < 0) {
-        return NULL;
-    }
-
-    int ret = collect_backup_data(bakpath, bakpath);
-    return StringValue(strdup(ret == 0 ? "t" : ""));
 }
 
 Value* RunProgramFn(const char* name, State* state, int argc, Expr* argv[]) {
@@ -1525,11 +1416,10 @@ Value* ReadFileFn(const char* name, State* state, int argc, Expr* argv[]) {
 // current package (because nothing has cleared the copy of the
 // arguments stored in the BCB).
 //
-// The first argument is the block device for the misc partition
-// ("/misc" in the fstab).  The second argument is the argument
-// passed to the android reboot property.  It can be "recovery" to
-// boot from the recovery partition, or "" (empty string) to boot
-// from the regular boot partition.
+// The argument is the partition name passed to the android reboot
+// property.  It can be "recovery" to boot from the recovery
+// partition, or "" (empty string) to boot from the regular boot
+// partition.
 Value* RebootNowFn(const char* name, State* state, int argc, Expr* argv[]) {
     if (argc != 2) {
         return ErrorAbort(state, "%s() expects 2 args, got %d", name, argc);
@@ -1545,9 +1435,6 @@ Value* RebootNowFn(const char* name, State* state, int argc, Expr* argv[]) {
     memset(buffer, 0, sizeof(((struct bootloader_message*)0)->command));
     FILE* f = fopen(filename, "r+b");
     fseek(f, offsetof(struct bootloader_message, command), SEEK_SET);
-#ifdef BOARD_RECOVERY_BLDRMSG_OFFSET
-    fseek(f, BOARD_RECOVERY_BLDRMSG_OFFSET, SEEK_CUR);
-#endif
     fwrite(buffer, sizeof(((struct bootloader_message*)0)->command), 1, f);
     fclose(f);
     free(filename);
@@ -1590,9 +1477,6 @@ Value* SetStageFn(const char* name, State* state, int argc, Expr* argv[]) {
     // package installation.
     FILE* f = fopen(filename, "r+b");
     fseek(f, offsetof(struct bootloader_message, stage), SEEK_SET);
-#ifdef BOARD_RECOVERY_BLDRMSG_OFFSET
-    fseek(f, BOARD_RECOVERY_BLDRMSG_OFFSET, SEEK_CUR);
-#endif
     int to_write = strlen(stagestr)+1;
     int max_size = sizeof(((struct bootloader_message*)0)->stage);
     if (to_write > max_size) {
@@ -1619,9 +1503,6 @@ Value* GetStageFn(const char* name, State* state, int argc, Expr* argv[]) {
     char buffer[sizeof(((struct bootloader_message*)0)->stage)];
     FILE* f = fopen(filename, "rb");
     fseek(f, offsetof(struct bootloader_message, stage), SEEK_SET);
-#ifdef BOARD_RECOVERY_BLDRMSG_OFFSET
-    fseek(f, BOARD_RECOVERY_BLDRMSG_OFFSET, SEEK_CUR);
-#endif
     fread(buffer, sizeof(buffer), 1, f);
     fclose(f);
     buffer[sizeof(buffer)-1] = '\0';
@@ -1741,6 +1622,4 @@ void RegisterInstallFunctions() {
 
     RegisterFunction("enable_reboot", EnableRebootFn);
     RegisterFunction("tune2fs", Tune2FsFn);
-
-    RegisterFunction("collect_backup_data", CollectBackupDataFn);
 }

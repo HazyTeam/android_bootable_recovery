@@ -20,7 +20,6 @@
 #include <pthread.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -63,7 +62,7 @@ static void close_file(void* cookie) {
 }
 
 struct token {
-    pid_t pid;
+    pthread_t th;
     const char* path;
     int result;
 };
@@ -105,31 +104,25 @@ void* start_sdcard_fuse(const char* path) {
     struct token* t = malloc(sizeof(struct token));
 
     t->path = path;
-    if ((t->pid = fork()) < 0) {
-        free(t);
-        return NULL;
-    }
-    if (t->pid == 0) {
-        run_sdcard_fuse(t);
-        _exit(0);
+    pthread_create(&(t->th), NULL, run_sdcard_fuse, t);
+
+    struct stat st;
+    int i;
+    for (i = 0; i < SDCARD_INSTALL_TIMEOUT; ++i) {
+        if (stat(FUSE_SIDELOAD_HOST_PATHNAME, &st) != 0) {
+            if (errno == ENOENT && i < SDCARD_INSTALL_TIMEOUT-1) {
+                sleep(1);
+                continue;
+            } else {
+                return NULL;
+            }
+        }
     }
 
-    time_t start_time = time(NULL);
-    time_t now = start_time;
-
-    while (now - start_time < SDCARD_INSTALL_TIMEOUT) {
-        struct stat st;
-        if (stat(FUSE_SIDELOAD_HOST_PATHNAME, &st) == 0) {
-            break;
-        }
-        if (errno != ENOENT && errno != ENOTCONN) {
-            free(t);
-            t = NULL;
-            break;
-        }
-        sleep(1);
-        now = time(NULL);
-    }
+    // The installation process expects to find the sdcard unmounted.
+    // Unmount it with MNT_DETACH so that our open file continues to
+    // work but new references see it as unmounted.
+    umount2("/sdcard", MNT_DETACH);
 
     return t;
 }
@@ -138,9 +131,11 @@ void finish_sdcard_fuse(void* cookie) {
     if (cookie == NULL) return;
     struct token* t = (struct token*)cookie;
 
-    kill(t->pid, SIGTERM);
-    int status;
-    waitpid(t->pid, &status, 0);
+    // Calling stat() on this magic filename signals the fuse
+    // filesystem to shut down.
+    struct stat st;
+    stat(FUSE_SIDELOAD_HOST_EXIT_PATHNAME, &st);
 
+    pthread_join(t->th, NULL);
     free(t);
 }

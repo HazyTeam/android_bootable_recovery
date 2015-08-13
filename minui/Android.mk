@@ -1,54 +1,32 @@
 LOCAL_PATH := $(call my-dir)
+include $(CLEAR_VARS)
 
-common_cflags :=
-
-common_src_files := graphics.c graphics_adf.c graphics_fbdev.c events.c \
+LOCAL_SRC_FILES := graphics.c graphics_adf.c graphics_fbdev.c events.c \
 	resources.c
 
-common_c_includes := \
+LOCAL_C_INCLUDES +=\
     external/libpng\
     external/zlib
 
-common_additional_dependencies :=
+LOCAL_WHOLE_STATIC_LIBRARIES += libadf
 
-common_whole_static_libraries := libadf
+LOCAL_MODULE := libminui
 
-common_cflags += -std=gnu11
+# This used to compare against values in double-quotes (which are just
+# ordinary characters in this context).  Strip double-quotes from the
+# value so that either will work.
 
-ifeq ($(subst ",,$(TARGET_RECOVERY_PIXEL_FORMAT)),ABGR_8888)
-  common_cflags += -DRECOVERY_ABGR
-endif
 ifeq ($(subst ",,$(TARGET_RECOVERY_PIXEL_FORMAT)),RGBX_8888)
-  common_cflags += -DRECOVERY_RGBX
+  LOCAL_CFLAGS += -DRECOVERY_RGBX
 endif
-
 ifeq ($(subst ",,$(TARGET_RECOVERY_PIXEL_FORMAT)),BGRA_8888)
-  common_cflags += -DRECOVERY_BGRA
+  LOCAL_CFLAGS += -DRECOVERY_BGRA
 endif
 
 ifneq ($(TARGET_RECOVERY_OVERSCAN_PERCENT),)
-  common_cflags += -DOVERSCAN_PERCENT=$(TARGET_RECOVERY_OVERSCAN_PERCENT)
+  LOCAL_CFLAGS += -DOVERSCAN_PERCENT=$(TARGET_RECOVERY_OVERSCAN_PERCENT)
 else
-  common_cflags += -DOVERSCAN_PERCENT=0
+  LOCAL_CFLAGS += -DOVERSCAN_PERCENT=0
 endif
 
-
-include $(CLEAR_VARS)
-LOCAL_MODULE := libminui
-LOCAL_SRC_FILES := $(common_src_files)
-LOCAL_ADDITIONAL_DEPENDENCIES := $(common_additional_dependencies)
-LOCAL_C_INCLUDES += $(common_c_includes)
-LOCAL_CFLAGS := $(common_cflags)
-LOCAL_WHOLE_STATIC_LIBRARIES := $(common_whole_static_libraries)
 include $(BUILD_STATIC_LIBRARY)
-
-
-include $(CLEAR_VARS)
-LOCAL_MODULE := libminui
-LOCAL_SRC_FILES := $(common_src_files)
-LOCAL_ADDITIONAL_DEPENDENCIES := $(common_additional_dependencies)
-LOCAL_C_INCLUDES += $(common_c_includes)
-LOCAL_SHARED_LIBRARIES := libpng
-LOCAL_CFLAGS += $(common_cflags) -DSHARED_MINUI
-LOCAL_WHOLE_STATIC_LIBRARIES := $(common_whole_static_libraries)
-include $(BUILD_SHARED_LIBRARY)

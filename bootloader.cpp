@@ -26,16 +26,16 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static int get_bootloader_message_mtd(struct bootloader_message *out, const fstab_rec* v);
-static int set_bootloader_message_mtd(const struct bootloader_message *in, const fstab_rec* v);
-static int get_bootloader_message_block(struct bootloader_message *out, const fstab_rec* v);
-static int set_bootloader_message_block(const struct bootloader_message *in, const fstab_rec* v);
+static int get_bootloader_message_mtd(struct bootloader_message *out, const Volume* v);
+static int set_bootloader_message_mtd(const struct bootloader_message *in, const Volume* v);
+static int get_bootloader_message_block(struct bootloader_message *out, const Volume* v);
+static int set_bootloader_message_block(const struct bootloader_message *in, const Volume* v);
 
 int get_bootloader_message(struct bootloader_message *out) {
-    fstab_rec* v = volume_for_path("/misc");
+    Volume* v = volume_for_path("/misc");
     if (v == NULL) {
-        LOGI("Cannot load volume /misc.\n");
-        return -1;
+      LOGE("Cannot load volume /misc!\n");
+      return -1;
     }
     if (strcmp(v->fs_type, "mtd") == 0) {
         return get_bootloader_message_mtd(out, v);
@@ -47,10 +47,10 @@ int get_bootloader_message(struct bootloader_message *out) {
 }
 
 int set_bootloader_message(const struct bootloader_message *in) {
-    fstab_rec* v = volume_for_path("/misc");
+    Volume* v = volume_for_path("/misc");
     if (v == NULL) {
-        LOGI("Cannot load volume /misc.\n");
-        return -1;
+      LOGE("Cannot load volume /misc!\n");
+      return -1;
     }
     if (strcmp(v->fs_type, "mtd") == 0) {
         return set_bootloader_message_mtd(in, v);
@@ -69,7 +69,7 @@ static const int MISC_PAGES = 3;         // number of pages to save
 static const int MISC_COMMAND_PAGE = 1;  // bootloader command is this page
 
 static int get_bootloader_message_mtd(struct bootloader_message *out,
-                                      const fstab_rec* v) {
+                                      const Volume* v) {
     size_t write_size;
     mtd_scan_partitions();
     const MtdPartition *part = mtd_find_partition_by_name(v->blk_device);
@@ -95,7 +95,7 @@ static int get_bootloader_message_mtd(struct bootloader_message *out,
     return 0;
 }
 static int set_bootloader_message_mtd(const struct bootloader_message *in,
-                                      const fstab_rec* v) {
+                                      const Volume* v) {
     size_t write_size;
     mtd_scan_partitions();
     const MtdPartition *part = mtd_find_partition_by_name(v->blk_device);
@@ -161,16 +161,13 @@ static void wait_for_device(const char* fn) {
 }
 
 static int get_bootloader_message_block(struct bootloader_message *out,
-                                        const fstab_rec* v) {
+                                        const Volume* v) {
     wait_for_device(v->blk_device);
     FILE* f = fopen(v->blk_device, "rb");
     if (f == NULL) {
         LOGE("Can't open %s\n(%s)\n", v->blk_device, strerror(errno));
         return -1;
     }
-#ifdef BOARD_RECOVERY_BLDRMSG_OFFSET
-    fseek(f, BOARD_RECOVERY_BLDRMSG_OFFSET, SEEK_SET);
-#endif
     struct bootloader_message temp;
     int count = fread(&temp, sizeof(temp), 1, f);
     if (count != 1) {
@@ -186,16 +183,13 @@ static int get_bootloader_message_block(struct bootloader_message *out,
 }
 
 static int set_bootloader_message_block(const struct bootloader_message *in,
-                                        const fstab_rec* v) {
+                                        const Volume* v) {
     wait_for_device(v->blk_device);
-    FILE* f = fopen(v->blk_device, "rb+");
+    FILE* f = fopen(v->blk_device, "wb");
     if (f == NULL) {
         LOGE("Can't open %s\n(%s)\n", v->blk_device, strerror(errno));
         return -1;
     }
-#ifdef BOARD_RECOVERY_BLDRMSG_OFFSET
-    fseek(f, BOARD_RECOVERY_BLDRMSG_OFFSET, SEEK_SET);
-#endif
     int count = fwrite(in, sizeof(*in), 1, f);
     if (count != 1) {
         LOGE("Failed writing %s\n(%s)\n", v->blk_device, strerror(errno));

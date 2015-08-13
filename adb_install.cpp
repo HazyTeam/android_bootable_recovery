@@ -36,7 +36,6 @@ extern "C" {
 }
 
 static RecoveryUI* ui = NULL;
-static pthread_t sideload_thread;
 
 static void
 set_usb_driver(bool enabled) {
@@ -71,20 +70,19 @@ maybe_restart_adbd() {
     }
 }
 
-struct sideload_data {
-    int*        wipe_cache;
-    const char* install_file;
-    bool        cancel;
-    int         result;
-};
-
-static struct sideload_data sideload_data;
-
 // How long (in seconds) we wait for the host to start sending us a
 // package, before timing out.
 #define ADB_INSTALL_TIMEOUT 300
 
-void *adb_sideload_thread(void* v) {
+int
+apply_from_adb(RecoveryUI* ui_, int* wipe_cache, const char* install_file) {
+    ui = ui_;
+
+    stop_adbd();
+    set_usb_driver(true);
+
+    ui->Print("\n\nNow send the package you want to apply\n"
+              "to the device with \"adb sideload <filename>\"...\n");
 
     pid_t child;
     if ((child = fork()) == 0) {
@@ -92,59 +90,46 @@ void *adb_sideload_thread(void* v) {
         _exit(-1);
     }
 
-    time_t start_time = time(NULL);
-    time_t now = start_time;
-
     // FUSE_SIDELOAD_HOST_PATHNAME will start to exist once the host
     // connects and starts serving a package.  Poll for its
     // appearance.  (Note that inotify doesn't work with FUSE.)
-    int result = INSTALL_NONE;
-    int status = -1;
+    int result;
+    int status;
+    bool waited = false;
     struct stat st;
-    while (now - start_time < ADB_INSTALL_TIMEOUT) {
-        /*
-         * Exit if either:
-         *  - The adb child process dies, or
-         *  - The ui tells us to cancel
-         */
-        if (kill(child, 0) != 0) {
+    for (int i = 0; i < ADB_INSTALL_TIMEOUT; ++i) {
+        if (waitpid(child, &status, WNOHANG) != 0) {
             result = INSTALL_ERROR;
+            waited = true;
             break;
         }
 
-        if (sideload_data.cancel) {
-            break;
+        if (stat(FUSE_SIDELOAD_HOST_PATHNAME, &st) != 0) {
+            if (errno == ENOENT && i < ADB_INSTALL_TIMEOUT-1) {
+                sleep(1);
+                continue;
+            } else {
+                ui->Print("\nTimed out waiting for package.\n\n", strerror(errno));
+                result = INSTALL_ERROR;
+                kill(child, SIGKILL);
+                break;
+            }
         }
-
-        status = stat(FUSE_SIDELOAD_HOST_PATHNAME, &st);
-        if (status == 0) {
-            break;
-        }
-        if (errno != ENOENT && errno != ENOTCONN) {
-            ui->Print("\nError %s waiting for package\n\n", strerror(errno));
-            result = INSTALL_ERROR;
-            break;
-        }
-
-        sleep(1);
-        now = time(NULL);
+        result = install_package(FUSE_SIDELOAD_HOST_PATHNAME, wipe_cache, install_file, false);
+        break;
     }
 
-    if (status == 0) {
-        // Signal UI thread that we can no longer cancel
-        ui->CancelWaitKey();
+    if (!waited) {
+        // Calling stat() on this magic filename signals the minadbd
+        // subprocess to shut down.
+        stat(FUSE_SIDELOAD_HOST_EXIT_PATHNAME, &st);
 
-        result = install_package(FUSE_SIDELOAD_HOST_PATHNAME,
-                                 sideload_data.wipe_cache,
-                                 sideload_data.install_file,
-                                 false);
-
-        sideload_data.result = result;
+        // TODO(dougz): there should be a way to cancel waiting for a
+        // package (by pushing some button combo on the device).  For now
+        // you just have to 'adb sideload' a file that's not a valid
+        // package, like "/dev/null".
+        waitpid(child, &status, 0);
     }
-
-    // Ensure adb exits
-    kill(child, SIGTERM);
-    waitpid(child, &status, 0);
 
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         if (WEXITSTATUS(status) == 3) {
@@ -154,42 +139,8 @@ void *adb_sideload_thread(void* v) {
         }
     }
 
-    LOGI("sideload thread finished\n");
-    return NULL;
-}
-
-void
-start_sideload(RecoveryUI* ui_, int* wipe_cache, const char* install_file) {
-    ui = ui_;
-
-    stop_adbd();
-    set_usb_driver(true);
-
-    ui->Print("\n\nNow send the package you want to apply\n"
-              "to the device with \"adb sideload <filename>\"...\n");
-
-    sideload_data.wipe_cache = wipe_cache;
-    sideload_data.install_file = install_file;
-    sideload_data.cancel = false;
-    sideload_data.result = INSTALL_NONE;
-
-    pthread_create(&sideload_thread, NULL, &adb_sideload_thread, NULL);
-}
-
-void stop_sideload() {
-    sideload_data.cancel = true;
-}
-
-int wait_sideload() {
-    set_perf_mode(true);
-
-    pthread_join(sideload_thread, NULL);
-
-    ui->FlushKeys();
-
+    set_usb_driver(false);
     maybe_restart_adbd();
 
-    set_perf_mode(false);
-
-    return sideload_data.result;
+    return result;
 }

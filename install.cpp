@@ -21,7 +21,6 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <setjmp.h>
 
 #include "common.h"
 #include "install.h"
@@ -35,8 +34,6 @@
 #include "verifier.h"
 #include "ui.h"
 
-#include "cutils/properties.h"
-
 extern RecoveryUI* ui;
 
 #define ASSUMED_UPDATE_BINARY_NAME  "META-INF/com/google/android/update-binary"
@@ -47,12 +44,6 @@ static const int VERIFICATION_PROGRESS_TIME = 60;
 static const float VERIFICATION_PROGRESS_FRACTION = 0.25;
 static const float DEFAULT_FILES_PROGRESS_FRACTION = 0.4;
 static const float DEFAULT_IMAGE_PROGRESS_FRACTION = 0.1;
-
-static jmp_buf jb;
-static void sig_bus(int sig)
-{
-    longjmp(jb, 1);
-}
 
 // If the package contains an update binary, extract it and run it.
 static int
@@ -183,12 +174,7 @@ try_update_binary(const char *path, ZipArchive *zip, int* wipe_cache) {
     int status;
     waitpid(pid, &status, 0);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        if (WEXITSTATUS(status) != 7) {
-           LOGE("Installation error in %s\n(Status %d)\n", path, WEXITSTATUS(status));
-        } else {
-           LOGE("Failed to install %s\n", path);
-           LOGE("Please take note of all the above lines for reports\n");
-        }
+        LOGE("Error in %s\n(Status %d)\n", path, WEXITSTATUS(status));
         return INSTALL_ERROR;
     }
 
@@ -198,34 +184,11 @@ try_update_binary(const char *path, ZipArchive *zip, int* wipe_cache) {
 static int
 really_install_package(const char *path, int* wipe_cache, bool needs_mount)
 {
-    int ret = 0;
-
     ui->SetBackground(RecoveryUI::INSTALLING_UPDATE);
     ui->Print("Finding update package...\n");
     // Give verification half the progress bar...
     ui->SetProgressType(RecoveryUI::DETERMINATE);
     ui->ShowProgress(VERIFICATION_PROGRESS_FRACTION, VERIFICATION_PROGRESS_TIME);
-
-    // Resolve symlink in case legacy /sdcard path is used
-    // Requires: symlink uses absolute path
-    char new_path[PATH_MAX];
-    if (strlen(path) > 1) {
-        char *rest = strchr(path + 1, '/');
-        if (rest != NULL) {
-            int readlink_length;
-            int root_length = rest - path;
-            char *root = (char *)malloc(root_length + 1);
-            strncpy(root, path, root_length);
-            root[root_length] = 0;
-            readlink_length = readlink(root, new_path, PATH_MAX);
-            if (readlink_length > 0) {
-                strncpy(new_path + readlink_length, rest, PATH_MAX - readlink_length);
-                path = new_path;
-            }
-            free(root);
-        }
-    }
-
     LOGI("Update location: %s\n", path);
 
     // Map the update package into memory.
@@ -253,31 +216,16 @@ really_install_package(const char *path, int* wipe_cache, bool needs_mount)
     }
     LOGI("%d key(s) loaded from %s\n", numKeys, PUBLIC_KEYS_FILE);
 
-    set_perf_mode(true);
-
     ui->Print("Verifying update package...\n");
 
     int err;
-
-    // Because we mmap() the update file which is backed by FUSE, we get
-    // SIGBUS when the host aborts the transfer.  We handle this by using
-    // setjmp/longjmp.
-    signal(SIGBUS, sig_bus);
-    if (setjmp(jb) == 0) {
-        err = verify_file(map.addr, map.length, loadedKeys, numKeys);
-    }
-    else {
-        err = VERIFY_FAILURE;
-    }
-    signal(SIGBUS, SIG_DFL);
-
+    err = verify_file(map.addr, map.length, loadedKeys, numKeys);
     free(loadedKeys);
     LOGI("verify_file returned %d\n", err);
     if (err != VERIFY_SUCCESS) {
         LOGE("signature verification failed\n");
         sysReleaseMap(&map);
-        ret = INSTALL_CORRUPT;
-        goto out;
+        return INSTALL_CORRUPT;
     }
 
     /* Try to open the package.
@@ -287,23 +235,20 @@ really_install_package(const char *path, int* wipe_cache, bool needs_mount)
     if (err != 0) {
         LOGE("Can't open %s\n(%s)\n", path, err != -1 ? strerror(err) : "bad");
         sysReleaseMap(&map);
-        ret = INSTALL_CORRUPT;
-        goto out;
+        return INSTALL_CORRUPT;
     }
 
     /* Verify and install the contents of the package.
      */
     ui->Print("Installing update...\n");
     ui->SetEnableReboot(false);
-    ret = try_update_binary(path, &zip, wipe_cache);
+    int result = try_update_binary(path, &zip, wipe_cache);
     ui->SetEnableReboot(true);
     ui->Print("\n");
 
     sysReleaseMap(&map);
 
-out:
-    set_perf_mode(false);
-    return ret;
+    return result;
 }
 
 int
@@ -330,9 +275,4 @@ install_package(const char* path, int* wipe_cache, const char* install_file,
         fclose(install_log);
     }
     return result;
-}
-
-void
-set_perf_mode(bool enable) {
-    property_set("recovery.perf.mode", enable ? "1" : "0");
 }

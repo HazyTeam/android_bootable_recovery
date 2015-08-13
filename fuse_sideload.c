@@ -64,10 +64,10 @@
 #include "fuse_sideload.h"
 
 #define PACKAGE_FILE_ID   (FUSE_ROOT_ID+1)
+#define EXIT_FLAG_ID      (FUSE_ROOT_ID+2)
 
 #define NO_STATUS         1
-
-#define INSTALL_REQUIRED_MEMORY (100*1024*1024)
+#define NO_STATUS_EXIT    2
 
 struct fuse_data {
     int ffd;   // file descriptor for the fuse socket
@@ -83,7 +83,7 @@ struct fuse_data {
     uid_t uid;
     gid_t gid;
 
-    uint32_t curr_block;    // cache the block most recently used
+    uint32_t curr_block;    // cache the block most recently read from the host
     uint8_t* block_data;
 
     uint8_t* extra_block;   // another block of storage for reads that
@@ -91,80 +91,7 @@ struct fuse_data {
 
     uint8_t* hashes;        // SHA-256 hash of each block (all zeros
                             // if block hasn't been read yet)
-
-    // Block cache
-    uint32_t block_cache_max_size;   // Max allowed block cache size
-    uint32_t block_cache_size;       // Current block cache size
-    uint8_t** block_cache;           // Block cache data
 };
-
-static uint64_t free_memory() {
-    uint64_t mem = 0;
-    FILE* fp = fopen("/proc/meminfo", "r");
-    if (fp) {
-        char buf[256];
-        char* linebuf = buf;
-        size_t buflen = sizeof(buf);
-        while (getline(&linebuf, &buflen, fp) > 0) {
-            char* key = buf;
-            char* val = strchr(buf, ':');
-            *val = '\0';
-            ++val;
-            if (strcmp(key, "MemFree") == 0) {
-                mem += strtoul(val, NULL, 0) * 1024;
-            }
-            if (strcmp(key, "Buffers") == 0) {
-                mem += strtoul(val, NULL, 0) * 1024;
-            }
-            if (strcmp(key, "Cached") == 0) {
-                mem += strtoul(val, NULL, 0) * 1024;
-            }
-        }
-        fclose(fp);
-    }
-    return mem;
-}
-
-static int block_cache_fetch(struct fuse_data* fd, uint32_t block)
-{
-    if (fd->block_cache == NULL) {
-        return -1;
-    }
-    if (fd->block_cache[block] == NULL) {
-        return -1;
-    }
-    memcpy(fd->block_data, fd->block_cache[block], fd->block_size);
-    return 0;
-}
-
-static void block_cache_enter(struct fuse_data* fd, uint32_t block)
-{
-    struct block_entry* entry;
-    if (!fd->block_cache)
-        return;
-    if (fd->block_cache_size == fd->block_cache_max_size) {
-        // Evict a block from the cache.  Since the file is typically read
-        // sequentially, start looking from the block behind the current
-        // block and proceed backward.
-        int n;
-        for (n = fd->curr_block - 1; n != (int)fd->curr_block; --n) {
-            if (n < 0) {
-                n = fd->file_blocks - 1;
-            }
-            if (fd->block_cache[n]) {
-                free(fd->block_cache[n]);
-                fd->block_cache[n] = NULL;
-                fd->block_cache_size--;
-                break;
-            }
-        }
-    }
-
-    fd->block_cache[block] = (uint8_t*)malloc(fd->block_size);
-    memcpy(fd->block_cache[block], fd->block_data, fd->block_size);
-
-    fd->block_cache_size++;
-}
 
 static void fuse_reply(struct fuse_data* fd, __u64 unique, const void *data, size_t len)
 {
@@ -227,12 +154,14 @@ static int handle_getattr(void* data, struct fuse_data* fd, const struct fuse_in
         fill_attr(&(out.attr), fd, hdr->nodeid, 4096, S_IFDIR | 0555);
     } else if (hdr->nodeid == PACKAGE_FILE_ID) {
         fill_attr(&(out.attr), fd, PACKAGE_FILE_ID, fd->file_size, S_IFREG | 0444);
+    } else if (hdr->nodeid == EXIT_FLAG_ID) {
+        fill_attr(&(out.attr), fd, EXIT_FLAG_ID, 0, S_IFREG | 0);
     } else {
         return -ENOENT;
     }
 
     fuse_reply(fd, hdr->unique, &out, sizeof(out));
-    return NO_STATUS;
+    return (hdr->nodeid == EXIT_FLAG_ID) ? NO_STATUS_EXIT : NO_STATUS;
 }
 
 static int handle_lookup(void* data, struct fuse_data* fd,
@@ -247,17 +176,23 @@ static int handle_lookup(void* data, struct fuse_data* fd,
         out.nodeid = PACKAGE_FILE_ID;
         out.generation = PACKAGE_FILE_ID;
         fill_attr(&(out.attr), fd, PACKAGE_FILE_ID, fd->file_size, S_IFREG | 0444);
+    } else if (strncmp(FUSE_SIDELOAD_HOST_EXIT_FLAG, data,
+                       sizeof(FUSE_SIDELOAD_HOST_EXIT_FLAG)) == 0) {
+        out.nodeid = EXIT_FLAG_ID;
+        out.generation = EXIT_FLAG_ID;
+        fill_attr(&(out.attr), fd, EXIT_FLAG_ID, 0, S_IFREG | 0);
     } else {
         return -ENOENT;
     }
 
     fuse_reply(fd, hdr->unique, &out, sizeof(out));
-    return NO_STATUS;
+    return (out.nodeid == EXIT_FLAG_ID) ? NO_STATUS_EXIT : NO_STATUS;
 }
 
 static int handle_open(void* data, struct fuse_data* fd, const struct fuse_in_header* hdr) {
     const struct fuse_open_in* req = data;
 
+    if (hdr->nodeid == EXIT_FLAG_ID) return -EPERM;
     if (hdr->nodeid != PACKAGE_FILE_ID) return -ENOENT;
 
     struct fuse_open_out out;
@@ -284,11 +219,6 @@ static int fetch_block(struct fuse_data* fd, uint32_t block) {
 
     if (block >= fd->file_blocks) {
         memset(fd->block_data, 0, fd->block_size);
-        fd->curr_block = block;
-        return 0;
-    }
-
-    if (block_cache_fetch(fd, block) == 0) {
         fd->curr_block = block;
         return 0;
     }
@@ -332,7 +262,6 @@ static int fetch_block(struct fuse_data* fd, uint32_t block) {
     }
 
     memcpy(blockhash, hash, SHA256_DIGEST_SIZE);
-    block_cache_enter(fd, block);
     return 0;
 }
 
@@ -409,12 +338,6 @@ static int handle_read(void* data, struct fuse_data* fd, const struct fuse_in_he
     return NO_STATUS;
 }
 
-static volatile int terminated = 0;
-static void sig_term(int sig)
-{
-    terminated = 1;
-}
-
 int run_fuse_sideload(struct provider_vtab* vtab, void* cookie,
                       uint64_t file_size, uint32_t block_size)
 {
@@ -472,26 +395,6 @@ int run_fuse_sideload(struct provider_vtab* vtab, void* cookie,
         goto done;
     }
 
-    fd.block_cache_max_size = 0;
-    fd.block_cache_size = 0;
-    fd.block_cache = NULL;
-    uint64_t mem = free_memory();
-    uint64_t avail = mem - (INSTALL_REQUIRED_MEMORY + fd.file_blocks * sizeof(uint8_t*));
-    if (mem > avail) {
-        uint32_t max_size = avail / fd.block_size;
-        if (max_size > fd.file_blocks) {
-            max_size = fd.file_blocks;
-        }
-        // The cache must be at least 1% of the file size or two blocks,
-        // whichever is larger.
-        if (max_size >= fd.file_blocks/100 && max_size >= 2) {
-            fd.block_cache_max_size = max_size;
-            fd.block_cache = (uint8_t**)calloc(fd.file_blocks, sizeof(uint8_t*));
-        }
-    }
-
-    signal(SIGTERM, sig_term);
-
     fd.ffd = open("/dev/fuse", O_RDWR);
     if (fd.ffd < 0) {
         perror("open /dev/fuse");
@@ -512,17 +415,7 @@ int run_fuse_sideload(struct provider_vtab* vtab, void* cookie,
         goto done;
     }
     uint8_t request_buffer[sizeof(struct fuse_in_header) + PATH_MAX*8];
-    while (!terminated) {
-        fd_set fds;
-        struct timeval tv;
-        FD_ZERO(&fds);
-        FD_SET(fd.ffd, &fds);
-        tv.tv_sec = 1;
-        tv.tv_usec = 0;
-        int rc = select(fd.ffd+1, &fds, NULL, NULL, &tv);
-        if (rc <= 0) {
-            continue;
-        }
+    for (;;) {
         ssize_t len = read(fd.ffd, request_buffer, sizeof(request_buffer));
         if (len < 0) {
             if (errno != EINTR) {
@@ -579,6 +472,11 @@ int run_fuse_sideload(struct provider_vtab* vtab, void* cookie,
                 break;
         }
 
+        if (result == NO_STATUS_EXIT) {
+            result = 0;
+            break;
+        }
+
         if (result != NO_STATUS) {
             struct fuse_out_header outhdr;
             outhdr.len = sizeof(outhdr);
@@ -597,13 +495,6 @@ int run_fuse_sideload(struct provider_vtab* vtab, void* cookie,
     }
 
     if (fd.ffd) close(fd.ffd);
-    if (fd.block_cache) {
-        uint32_t n;
-        for (n = 0; n < fd.file_blocks; ++n) {
-            free(fd.block_cache[n]);
-        }
-        free(fd.block_cache);
-    }
     free(fd.hashes);
     free(fd.block_data);
     free(fd.extra_block);

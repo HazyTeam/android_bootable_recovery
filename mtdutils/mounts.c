@@ -113,10 +113,10 @@ scan_mounted_volumes()
      */
     bufp = buf;
     while (nbytes > 0) {
-        char device[PATH_MAX];
-        char mount_point[PATH_MAX];
+        char device[64];
+        char mount_point[64];
         char filesystem[64];
-        char flags[256];
+        char flags[128];
         int matches;
 
         /* %as is a gnu extension that malloc()s a string for each field.
@@ -206,21 +206,6 @@ unmount_mounted_volume(const MountedVolume *volume)
      * function.
      */
     int ret = umount(volume->mount_point);
-    if (ret == 0) {
-        free_volume_internals(volume, 1);
-        return 0;
-    }
-    return ret;
-}
-
-int
-unmount_mounted_volume_detach(const MountedVolume *volume)
-{
-    /* Intentionally pass NULL to umount if the caller tries
-     * to unmount a volume they already unmounted using this
-     * function.
-     */
-    int ret = umount2(volume->mount_point, MNT_DETACH);
     if (ret == 0) {
         free_volume_internals(volume, 1);
         return 0;

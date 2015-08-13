@@ -19,7 +19,7 @@ LOCAL_MODULE_TAGS := eng
 
 LOCAL_SRC_FILES := $(updater_src_files)
 
-#ifeq ($(TARGET_USERIMAGES_USE_EXT4), true)
+ifeq ($(TARGET_USERIMAGES_USE_EXT4), true)
 LOCAL_CFLAGS += -DUSE_EXT4
 LOCAL_CFLAGS += -Wno-unused-parameter
 LOCAL_C_INCLUDES += system/extras/ext4_utils
@@ -28,17 +28,6 @@ LOCAL_STATIC_LIBRARIES += \
     libsparse_static \
     libz \
     liblz4-static
-#endif
-
-LOCAL_C_INCLUDES += external/e2fsprogs/lib
-LOCAL_STATIC_LIBRARIES += libext2_blkid libext2_uuid
-
-ifneq ($(BOARD_RECOVERY_BLDRMSG_OFFSET),)
-    LOCAL_CFLAGS += -DBOARD_RECOVERY_BLDRMSG_OFFSET=$(BOARD_RECOVERY_BLDRMSG_OFFSET)
-endif
-
-ifeq ($(BOARD_SUPPRESS_EMMC_WIPE),true)
-    LOCAL_CFLAGS += -DSUPPRESS_EMMC_WIPE
 endif
 
 LOCAL_STATIC_LIBRARIES += $(TARGET_RECOVERY_UPDATER_LIBS) $(TARGET_RECOVERY_UPDATER_EXTRA_LIBS)
@@ -69,11 +58,8 @@ LOCAL_C_INCLUDES += $(LOCAL_PATH)/..
 # any subsidiary static libraries required for your registered
 # extension libs.
 
-ifeq ($(TARGET_ARCH),arm64)
-inc := $(call intermediates-dir-for,PACKAGING,updater_extensions,,,32)/register.inc
-else
 inc := $(call intermediates-dir-for,PACKAGING,updater_extensions)/register.inc
-endif
+
 # Encode the value of TARGET_RECOVERY_UPDATER_LIBS into the filename of the dependency.
 # So if TARGET_RECOVERY_UPDATER_LIBS is changed, a new dependency file will be generated.
 # Note that we have to remove any existing depency files before creating new one,
@@ -93,18 +79,14 @@ $(inc) : $(inc_dep_file)
 	$(hide) echo "void RegisterDeviceExtensions() {" >> $@
 	$(hide) $(foreach lib,$(libs),echo "  Register_$(lib)();" >> $@;)
 	$(hide) echo "}" >> $@
-ifeq ($(TARGET_ARCH),arm64)
-$(call intermediates-dir-for,EXECUTABLES,updater,,,32)/updater.o : $(inc)
-else
+
 $(call intermediates-dir-for,EXECUTABLES,updater)/updater.o : $(inc)
-endif
 LOCAL_C_INCLUDES += $(dir $(inc))
 
 inc :=
 inc_dep_file :=
 
 LOCAL_MODULE := updater
-LOCAL_32_BIT_ONLY := true
 
 LOCAL_FORCE_STATIC_EXECUTABLE := true
 
