@@ -74,6 +74,7 @@ inc := $(call intermediates-dir-for,PACKAGING,updater_extensions,,,32)/register.
 else
 inc := $(call intermediates-dir-for,PACKAGING,updater_extensions)/register.inc
 endif
+
 # Encode the value of TARGET_RECOVERY_UPDATER_LIBS into the filename of the dependency.
 # So if TARGET_RECOVERY_UPDATER_LIBS is changed, a new dependency file will be generated.
 # Note that we have to remove any existing depency files before creating new one,
@@ -94,7 +95,11 @@ $(inc) : $(inc_dep_file)
 	$(hide) $(foreach lib,$(libs),echo "  Register_$(lib)();" >> $@;)
 	$(hide) echo "}" >> $@
 
-$(call intermediates-dir-for,EXECUTABLES,updater,,,$(TARGET_PREFER_32_BIT))/updater.o : $(inc)
+ifeq ($(TARGET_ARCH),arm64)
+$(call intermediates-dir-for,EXECUTABLES,updater,,,32)/updater.o : $(inc)
+else
+$(call intermediates-dir-for,EXECUTABLES,updater)/updater.o : $(inc)
+endif
 LOCAL_C_INCLUDES += $(dir $(inc))
 
 inc :=
