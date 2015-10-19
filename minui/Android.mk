@@ -1,22 +1,27 @@
 LOCAL_PATH := $(call my-dir)
 
-common_cflags :=
+LOCAL_SRC_FILES := \
+    events.cpp \
+    graphics.cpp \
+    graphics_adf.cpp \
+    graphics_drm.cpp \
+    graphics_fbdev.cpp \
+    resources.cpp \
 
-common_src_files := graphics.c graphics_adf.c graphics_fbdev.c events.c \
-	resources.c
-
-common_c_includes := \
-    external/libpng\
-    external/zlib
-
-common_additional_dependencies :=
+LOCAL_WHOLE_STATIC_LIBRARIES += libadf
+LOCAL_WHOLE_STATIC_LIBRARIES += libdrm
+LOCAL_STATIC_LIBRARIES += libpng
 
 common_whole_static_libraries := libadf
 
-common_cflags += -std=gnu11
+LOCAL_CLANG := true
+
+# This used to compare against values in double-quotes (which are just
+# ordinary characters in this context).  Strip double-quotes from the
+# value so that either will work.
 
 ifeq ($(subst ",,$(TARGET_RECOVERY_PIXEL_FORMAT)),ABGR_8888)
-  common_cflags += -DRECOVERY_ABGR
+  LOCAL_CFLAGS += -DRECOVERY_ABGR
 endif
 ifeq ($(subst ",,$(TARGET_RECOVERY_PIXEL_FORMAT)),RGBX_8888)
   common_cflags += -DRECOVERY_RGBX
@@ -42,13 +47,9 @@ LOCAL_CFLAGS := $(common_cflags)
 LOCAL_WHOLE_STATIC_LIBRARIES := $(common_whole_static_libraries)
 include $(BUILD_STATIC_LIBRARY)
 
-
+# Used by OEMs for factory test images.
 include $(CLEAR_VARS)
 LOCAL_MODULE := libminui
-LOCAL_SRC_FILES := $(common_src_files)
-LOCAL_ADDITIONAL_DEPENDENCIES := $(common_additional_dependencies)
-LOCAL_C_INCLUDES += $(common_c_includes)
+LOCAL_WHOLE_STATIC_LIBRARIES += libminui
 LOCAL_SHARED_LIBRARIES := libpng
-LOCAL_CFLAGS += $(common_cflags) -DSHARED_MINUI
-LOCAL_WHOLE_STATIC_LIBRARIES := $(common_whole_static_libraries)
 include $(BUILD_SHARED_LIBRARY)

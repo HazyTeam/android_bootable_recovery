@@ -93,11 +93,8 @@ $(inc) : $(inc_dep_file)
 	$(hide) echo "void RegisterDeviceExtensions() {" >> $@
 	$(hide) $(foreach lib,$(libs),echo "  Register_$(lib)();" >> $@;)
 	$(hide) echo "}" >> $@
-ifeq ($(TARGET_ARCH),arm64)
-$(call intermediates-dir-for,EXECUTABLES,updater,,,32)/updater.o : $(inc)
-else
-$(call intermediates-dir-for,EXECUTABLES,updater)/updater.o : $(inc)
-endif
+
+$(call intermediates-dir-for,EXECUTABLES,updater,,,$(TARGET_PREFER_32_BIT))/updater.o : $(inc)
 LOCAL_C_INCLUDES += $(dir $(inc))
 
 inc :=

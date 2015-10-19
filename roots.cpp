@@ -347,15 +347,10 @@ int ensure_volume_mounted(fstab_rec* v, bool force_rw) {
         }
         return mtd_mount_partition(partition, v->mount_point, v->fs_type, 0);
     } else if (strcmp(v->fs_type, "ext4") == 0 ||
-               strcmp(v->fs_type, "f2fs") == 0 ||
+               strcmp(v->fs_type, "squashfs") == 0 ||
                strcmp(v->fs_type, "vfat") == 0) {
-        unsigned long mntflags = MS_NOATIME | MS_NODEV | MS_NODIRATIME;
-        if (!force_rw) {
-            if ((v->flags & MS_RDONLY) || fs_mgr_is_verified(v)) {
-                mntflags |= MS_RDONLY;
-            }
-        }
-        result = mount(v->blk_device, v->mount_point, v->fs_type, mntflags, "");
+        result = mount(v->blk_device, v->mount_point, v->fs_type,
+                       v->flags, v->fs_options);
         if (result == 0) return 0;
 
         LOGE("failed to mount %s (%s)\n", v->mount_point, strerror(errno));

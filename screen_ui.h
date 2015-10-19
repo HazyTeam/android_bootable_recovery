@@ -18,6 +18,7 @@
 #define RECOVERY_SCREEN_UI_H
 
 #include <pthread.h>
+#include <stdio.h>
 
 #include "ui.h"
 #include "minui/minui.h"
@@ -47,28 +48,25 @@ class ScreenRecoveryUI : public RecoveryUI {
     bool WasTextEverVisible();
 
     // printing messages
-    void Print(const char* fmt, ...); // __attribute__((format(printf, 1, 2)));
-    void ClearLog();
-    void DialogShowInfo(const char* text);
-    void DialogShowError(const char* text);
-    void DialogShowErrorLog(const char* text);
-    int  DialogShowing() const { return (dialog_text != NULL); }
-    bool DialogDismissable() const { return (dialog_icon == ERROR); }
-    void DialogDismiss();
-    void SetHeadlessMode();
+    void Print(const char* fmt, ...) __printflike(2, 3);
+    void ShowFile(const char* filename);
 
     // menu display
     virtual int MenuItemStart() const { return menu_item_start; }
     virtual int MenuItemHeight() const { return 3*char_height; }
     void StartMenu(const char* const * headers, const char* const * items,
-                           int initial_selection);
-    int SelectMenu(int sel, bool abs = false);
+                   int initial_selection);
+    int SelectMenu(int sel);
     void EndMenu();
+
+    void KeyLongPress(int);
 
     void Redraw();
 
-    enum UIElement { HEADER, MENU, TOP, MENU_SEL_BG, MENU_SEL_FG, LOG, TEXT_FILL, ERROR_TEXT };
-    virtual void SetColor(UIElement e);
+    enum UIElement {
+        HEADER, MENU, MENU_SEL_BG, MENU_SEL_BG_ACTIVE, MENU_SEL_FG, LOG, TEXT_FILL, INFO
+    };
+    void SetColor(UIElement e);
 
   private:
     Icon currentIcon;
@@ -77,58 +75,43 @@ class ScreenRecoveryUI : public RecoveryUI {
     bool rtl_locale;
 
     pthread_mutex_t updateMutex;
-    pthread_cond_t  progressCondition;
-
-    gr_surface headerIcon;
-    gr_surface backgroundIcon[NR_ICONS];
-    gr_surface backgroundText[NR_ICONS];
-    gr_surface *installation;
-    gr_surface progressBarEmpty;
-    gr_surface progressBarFill;
-    gr_surface stageMarkerEmpty;
-    gr_surface stageMarkerFill;
+    GRSurface* backgroundIcon[5];
+    GRSurface* backgroundText[5];
+    GRSurface** installation;
+    GRSurface* progressBarEmpty;
+    GRSurface* progressBarFill;
+    GRSurface* stageMarkerEmpty;
+    GRSurface* stageMarkerFill;
 
     ProgressType progressBarType;
 
     float progressScopeStart, progressScopeSize, progress;
     double progressScopeTime, progressScopeDuration;
 
-    // true when both graphics pages are the same (except for the
-    // progress bar)
+    // true when both graphics pages are the same (except for the progress bar).
     bool pagesIdentical;
 
-    static const int kMaxCols = 96;
-    static const int kMaxRows = 96;
+    size_t text_cols_, text_rows_;
 
-    static const int kMaxMenuCols = 96;
-    static const int kMaxMenuRows = 250;
+    // Log text overlay, displayed when a magic key is pressed.
+    char** text_;
+    size_t text_col_, text_row_, text_top_;
 
-    // Log text overlay, displayed when a magic key is pressed
-    char text[kMaxRows][kMaxCols];
-    int log_text_cols, log_text_rows;
-    int text_cols, text_rows;
-    int text_col, text_row, text_top;
     bool show_text;
     bool show_text_ever;   // has show_text ever been true?
 
-    Icon dialog_icon;
-    char *dialog_text;
-    bool dialog_show_log;
-
-    char menu[kMaxMenuRows][kMaxMenuCols];
+    char** menu_;
+    const char* const* menu_headers_;
     bool show_menu;
     int menu_items, menu_sel;
-    int menu_show_start;
-    int max_menu_rows;
 
-    int menu_item_start;
+    // An alternate text screen, swapped with 'text_' when we're viewing a log file.
+    char** file_viewer_text_;
 
-    pthread_t progress_t;
+    pthread_t progress_thread_;
 
     int animation_fps;
     int installing_frames;
-  protected:
-  private:
 
     int iconX, iconY;
 
@@ -153,14 +136,22 @@ class ScreenRecoveryUI : public RecoveryUI {
     void draw_dialog();
     void draw_screen_locked();
     void update_screen_locked();
-    static void* progress_thread(void* cookie);
-    void progress_loop();
+    void update_progress_locked();
 
-    void LoadBitmap(const char* filename, gr_surface* surface);
-    void LoadBitmapArray(const char* filename, int* frames, gr_surface** surface);
-    void LoadLocalizedBitmap(const char* filename, gr_surface* surface);
+    static void* ProgressThreadStartRoutine(void* data);
+    void ProgressThreadLoop();
 
-    void ToggleRainbowMode();
+    void ShowFile(FILE*);
+    void PutChar(char);
+    void ClearText();
+
+    void DrawHorizontalRule(int* y);
+    void DrawTextLine(int* y, const char* line, bool bold);
+    void DrawTextLines(int* y, const char* const* lines);
+
+    void LoadBitmap(const char* filename, GRSurface** surface);
+    void LoadBitmapArray(const char* filename, int* frames, GRSurface*** surface);
+    void LoadLocalizedBitmap(const char* filename, GRSurface** surface);
 };
 
 #endif  // RECOVERY_UI_H

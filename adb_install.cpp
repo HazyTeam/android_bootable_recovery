@@ -30,10 +30,8 @@
 #include "install.h"
 #include "common.h"
 #include "adb_install.h"
-extern "C" {
 #include "minadbd/fuse_adb_provider.h"
 #include "fuse_sideload.h"
-}
 
 static RecoveryUI* ui = NULL;
 static pthread_t sideload_thread;
@@ -45,7 +43,7 @@ set_usb_driver(bool enabled) {
         ui->Print("failed to open driver control: %s\n", strerror(errno));
         return;
     }
-    if (write(fd, enabled ? "1" : "0", 1) < 0) {
+    if (TEMP_FAILURE_RETRY(write(fd, enabled ? "1" : "0", 1)) == -1) {
         ui->Print("failed to set driver control: %s\n", strerror(errno));
     }
     if (close(fd) < 0) {
@@ -62,9 +60,7 @@ stop_adbd() {
 
 static void
 maybe_restart_adbd() {
-    char value[PROPERTY_VALUE_MAX+1];
-    int len = property_get("ro.debuggable", value, NULL);
-    if (len == 1 && value[0] == '1') {
+    if (is_ro_debuggable()) {
         ui->Print("Restarting adbd...\n");
         set_usb_driver(true);
         property_set("ctl.start", "adbd");
@@ -84,7 +80,17 @@ static struct sideload_data sideload_data;
 // package, before timing out.
 #define ADB_INSTALL_TIMEOUT 300
 
-void *adb_sideload_thread(void* v) {
+int
+apply_from_adb(RecoveryUI* ui_, bool* wipe_cache, const char* install_file) {
+    modified_flash = true;
+
+    ui = ui_;
+
+    stop_adbd();
+    set_usb_driver(true);
+
+    ui->Print("\n\nNow send the package you want to apply\n"
+              "to the device with \"adb sideload <filename>\"...\n");
 
     pid_t child;
     if ((child = fork()) == 0) {
@@ -112,18 +118,16 @@ void *adb_sideload_thread(void* v) {
             break;
         }
 
-        if (sideload_data.cancel) {
-            break;
-        }
-
-        status = stat(FUSE_SIDELOAD_HOST_PATHNAME, &st);
-        if (status == 0) {
-            break;
-        }
-        if (errno != ENOENT && errno != ENOTCONN) {
-            ui->Print("\nError %s waiting for package\n\n", strerror(errno));
-            result = INSTALL_ERROR;
-            break;
+        if (stat(FUSE_SIDELOAD_HOST_PATHNAME, &st) != 0) {
+            if (errno == ENOENT && i < ADB_INSTALL_TIMEOUT-1) {
+                sleep(1);
+                continue;
+            } else {
+                ui->Print("\nTimed out waiting for package.\n\n");
+                result = INSTALL_ERROR;
+                kill(child, SIGKILL);
+                break;
+            }
         }
 
         sleep(1);

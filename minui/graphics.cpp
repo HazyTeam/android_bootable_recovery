@@ -16,6 +16,7 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <fcntl.h>
@@ -39,19 +40,10 @@
 #include "minui.h"
 #include "graphics.h"
 
-
-#ifndef ARRAY_SIZE
-#define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
-#endif
-
-typedef struct {
-    char        name[80];
-    GRFont*     font;
-} font_item;
-
-static font_item gr_fonts[] = {
-    { "menu", NULL },
-    { "log", NULL },
+struct GRFont {
+    GRSurface* texture;
+    int cwidth;
+    int cheight;
 };
 
 static GRFont* gr_font = NULL;
@@ -60,8 +52,6 @@ static minui_backend* gr_backend = NULL;
 static int overscan_percent = OVERSCAN_PERCENT;
 static int overscan_offset_x = 0;
 static int overscan_offset_y = 0;
-
-static int gr_vt_fd = -1;
 
 static unsigned char gr_current_r = 255;
 static unsigned char gr_current_g = 255;
@@ -148,50 +138,7 @@ static void text_blend(unsigned char* src_p, int src_row_bytes,
     }
 }
 
-/* Add text_blend one bitmap buffer */
-void gr_text_blend(int x,int y, GRFont* font)
-{
-    if (font == NULL ||font->texture==NULL  || outside(x, y) || outside(x+font->cwidth-1, y+font->cheight-1))
-        return;
-
-    unsigned char* src_p = font->texture->data;
-    int offset = y * gr_draw->row_bytes + x * gr_draw->pixel_bytes;
-    unsigned char *dst_p = gr_draw->data+offset;
-
-    text_blend(src_p,font->cwidth,dst_p,gr_draw->row_bytes,font->cwidth,font->cheight);
-}
-
-static int rainbow_index = 0;
-static int rainbow_enabled = 0;
-static int rainbow_colors[] = { 255, 0, 0,        // red
-                                255, 127, 0,      // orange
-                                255, 255, 0,      // yellow
-                                0, 255, 0,        // green
-                                60, 80, 255,      // blue
-                                143, 0, 255 };    // violet
-static int num_rb_colors =
-        (sizeof(rainbow_colors)/sizeof(rainbow_colors[0])) / 3;
-
-static void rainbow(int col) {
-    int rainbow_color = ((rainbow_index + col) % num_rb_colors) * 3;
-    gr_color(rainbow_colors[rainbow_color], rainbow_colors[rainbow_color+1],
-                rainbow_colors[rainbow_color+2], 255);
-}
-
-void set_rainbow_mode(int enabled) {
-    rainbow_enabled = enabled;
-}
-
-void move_rainbow(int x) {
-    rainbow_index += x;
-    if (rainbow_index < 0) {
-        rainbow_index = num_rb_colors - 1;
-    } else if (rainbow_index >= num_rb_colors) {
-        rainbow_index = 0;
-    }
-}
-
-void gr_text(int x, int y, const char *s, int bold)
+void gr_text(int x, int y, const char *s, bool bold)
 {
     GRFont* font = gr_font;
 
@@ -204,8 +151,6 @@ void gr_text(int x, int y, const char *s, int bold)
 
     unsigned char ch;
     while ((ch = *s++)) {
-        if (rainbow_enabled) rainbow(x / font->cwidth);
-
         if (outside(x, y) || outside(x+font->cwidth-1, y+font->cheight-1)) break;
 
         if (ch < ' ' || ch > '~') {
@@ -388,10 +333,7 @@ unsigned int gr_get_height(GRSurface* surface) {
 
 static void gr_init_one_font(int idx)
 {
-    char name[80];
-    GRFont* gr_font = calloc(sizeof(*gr_font), 1);
-    snprintf(name, sizeof(name), "font_%s", gr_fonts[idx].name);
-    gr_fonts[idx].font = gr_font;
+    gr_font = reinterpret_cast<GRFont*>(calloc(sizeof(*gr_font), 1));
 
     int res = res_create_alpha_surface(name, &(gr_font->texture));
     if (res == 0) {
@@ -404,14 +346,14 @@ static void gr_init_one_font(int idx)
         printf("failed to read font: res=%d\n", res);
 
         // fall back to the compiled-in font.
-        gr_font->texture = malloc(sizeof(*gr_font->texture));
+        gr_font->texture = reinterpret_cast<GRSurface*>(malloc(sizeof(*gr_font->texture)));
         gr_font->texture->width = font.width;
         gr_font->texture->height = font.height;
         gr_font->texture->row_bytes = font.width;
         gr_font->texture->pixel_bytes = 1;
 
-        unsigned char* bits = malloc(font.width * font.height);
-        gr_font->texture->data = (void*) bits;
+        unsigned char* bits = reinterpret_cast<unsigned char*>(malloc(font.width * font.height));
+        gr_font->texture->data = reinterpret_cast<unsigned char*>(bits);
 
         unsigned char data;
         unsigned char* in = font.rundata;
@@ -457,7 +399,7 @@ static void gr_test() {
         gr_clear();
 
         gr_color(255, 0, 0, 255);
-        gr_surface frame = images[x%frames];
+        GRSurface* frame = images[x%frames];
         gr_blit(frame, 0, 0, frame->width, frame->height, x, 0);
 
         gr_color(255, 0, 0, 128);
@@ -491,23 +433,17 @@ int gr_init(void)
 {
     gr_init_font();
 
-    gr_vt_fd = open("/dev/tty0", O_RDWR | O_SYNC);
-    if (gr_vt_fd < 0) {
-        // This is non-fatal; post-Cupcake kernels don't have tty0.
-        perror("can't open /dev/tty0");
-    } else if (ioctl(gr_vt_fd, KDSETMODE, (void*) KD_GRAPHICS)) {
-        // However, if we do open tty0, we expect the ioctl to work.
-        perror("failed KDSETMODE to KD_GRAPHICS on tty0");
-        gr_exit();
-        return -1;
-    }
-
     gr_backend = open_adf();
     if (gr_backend) {
         gr_draw = gr_backend->init(gr_backend);
         if (!gr_draw) {
             gr_backend->exit(gr_backend);
         }
+    }
+
+    if (!gr_draw) {
+        gr_backend = open_drm();
+        gr_draw = gr_backend->init(gr_backend);
     }
 
     if (!gr_draw) {
@@ -530,10 +466,6 @@ int gr_init(void)
 void gr_exit(void)
 {
     gr_backend->exit(gr_backend);
-
-    ioctl(gr_vt_fd, KDSETMODE, (void*) KD_TEXT);
-    close(gr_vt_fd);
-    gr_vt_fd = -1;
 }
 
 int gr_fb_width(void)
